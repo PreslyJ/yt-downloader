@@ -6,6 +6,7 @@ import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
+import { ytFetch } from '@/lib/http';
 import {
   USER_AGENT,
   contentDisposition,
@@ -69,8 +70,8 @@ export async function GET(req: NextRequest) {
     }
 
     const [videoRes, audioRes] = await Promise.all([
-      fetch(videoFormat.url, { headers: { 'User-Agent': USER_AGENT } }),
-      fetch(audioFormat.url, { headers: { 'User-Agent': USER_AGENT } }),
+      ytFetch(videoFormat.url, { headers: { 'User-Agent': USER_AGENT } }),
+      ytFetch(audioFormat.url, { headers: { 'User-Agent': USER_AGENT } }),
     ]);
     if (!videoRes.ok || !videoRes.body || !audioRes.ok || !audioRes.body) {
       cleanup();

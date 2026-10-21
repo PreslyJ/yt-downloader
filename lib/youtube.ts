@@ -1,3 +1,5 @@
+import { ytFetch } from './http';
+
 // Minimal InnerTube client using YouTube's visionOS app identity, which still
 // serves direct (non-SABR) stream URLs and needs no signature deciphering or
 // Proof-of-Origin token. Mirrors yt-dlp's `visionos` client config.
@@ -58,7 +60,7 @@ export function contentDisposition(filename: string): string {
 let visitorData: Promise<string> | null = null;
 
 async function fetchVisitorData(): Promise<string> {
-  const res = await fetch('https://www.youtube.com/youtubei/v1/visitor_id?prettyPrint=false', {
+  const res = await ytFetch('https://www.youtube.com/youtubei/v1/visitor_id?prettyPrint=false', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -117,7 +119,7 @@ interface PlayerResponse {
 
 export async function getPlayerData(videoId: string): Promise<PlayerData> {
   const visitor = await getVisitorData();
-  const res = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+  const res = await ytFetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

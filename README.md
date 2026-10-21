@@ -40,9 +40,30 @@ Notes for Vercel:
 - `/api/download` sets `maxDuration = 300`; long/high-quality videos may still hit the
   plan's function time limit, and YouTube throttles stream URLs to roughly realtime, so
   a 10-minute video takes a few minutes to pull.
-- YouTube aggressively bot-checks datacenter IPs. This works from residential IPs; from
-  Vercel's egress it may intermittently answer "Sign in to confirm you're not a bot".
-  If that happens there is no clean fix short of a proxy.
+- YouTube blocks datacenter IPs outright: from Vercel (any region) every request is
+  answered "Sign in to confirm you're not a bot". Set the `YT_PROXY_URL` env var to a
+  residential proxy (see below) and the deployment works.
+- `/api/download` muxes into the function's `/tmp` (512 MB limit), so very large
+  videos (roughly >400 MB, e.g. long 1080p+) will fail on Vercel.
+
+## Proxy (`YT_PROXY_URL`)
+
+When set, every YouTube request (player lookup and the video/audio downloads) goes through
+the proxy. Thumbnails (`i.ytimg.com`) are not blocked and bypass it.
+
+```bash
+YT_PROXY_URL=http://USERNAME:PASSWORD@proxy.example.com:8000
+```
+
+- Use a **residential** proxy; datacenter proxies get the same bot wall.
+- It must be a **sticky session**: YouTube stream URLs are bound to the IP that requested
+  them, so a proxy that rotates the exit IP per connection makes the media fetch fail with
+  403. Providers usually expose stickiness as a session id in the username
+  (e.g. `user-session-abc123`) or a dedicated sticky port.
+- All video bytes flow through the proxy, so you are billed per GB (a 100 MB video costs
+  100 MB of proxy traffic).
+- Vercel: Project → Settings → Environment Variables → add `YT_PROXY_URL`, then redeploy.
+- Locally: `YT_PROXY_URL=... npm run dev` (or put it in `.env.local`).
 
 ## Caveats
 
