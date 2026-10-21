@@ -46,6 +46,21 @@ launchctl kickstart -k gui/$(id -u)/com.presly.yt-downloader
 Stop it with `launchctl bootout gui/$(id -u)/com.presly.yt-downloader`. The plist pins the
 nvm node path (`v20.19.0`); update it if that version is removed.
 
+## Free proxy for the Vercel deployment: your own home IP
+
+`proxy/server.mjs` is a small CONNECT proxy for a machine with a home IP. It requires a
+password (`PROXY_USER` / `PROXY_PASS`, min 16 chars) and only tunnels to port 443 of
+`youtube.com`, `googlevideo.com` and `ytimg.com`, so it cannot be used as an open relay.
+Expose it to Vercel with a TCP tunnel (e.g. Tailscale Funnel), then set `YT_PROXY_URL` on
+Vercel to the tunnel address with the credentials.
+
+Run it from outside `~/Documents` (macOS blocks background node there, see above). The
+launch agent `com.presly.yt-downloader-proxy` does this, loading credentials from
+`~/.config/yt-downloader/proxy.env` (mode 600) so no password sits in the plist.
+
+Trade-offs: the laptop must be on and online, and every video's bytes travel over your home
+upload link to Vercel and on to the browser.
+
 ## Deploy to Vercel
 
 ```bash
