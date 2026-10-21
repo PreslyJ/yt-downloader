@@ -26,6 +26,26 @@ npm install
 npm run dev     # http://localhost:3000
 ```
 
+## Run permanently on a Mac (launch agent)
+
+YouTube trusts a home IP, so running it on your own machine is the no-proxy option. A
+launch agent (`~/Library/LaunchAgents/com.presly.yt-downloader.plist`) starts the built app
+at login, restarts it if it dies, binds to `127.0.0.1:3210` only, and logs to
+`~/Library/Logs/yt-downloader.log`.
+
+It runs from a **copy** in `~/.local/share/yt-downloader`, not from this repo: macOS blocks
+background agents from reading `~/Documents` (a privacy prompt nobody can answer, so the
+process hangs silently). After changing code, redeploy the copy:
+
+```bash
+npm run build
+rsync -a --delete --exclude .git --exclude '.env*' ./ ~/.local/share/yt-downloader/
+launchctl kickstart -k gui/$(id -u)/com.presly.yt-downloader
+```
+
+Stop it with `launchctl bootout gui/$(id -u)/com.presly.yt-downloader`. The plist pins the
+nvm node path (`v20.19.0`); update it if that version is removed.
+
 ## Deploy to Vercel
 
 ```bash
