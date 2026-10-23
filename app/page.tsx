@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { FormEvent, useState } from 'react';
 
 interface FormatOption {
@@ -98,7 +99,10 @@ export default function Home() {
   return (
     <main>
       <h1>▶ YT Downloader</h1>
-      <p className="subtitle">Paste a YouTube link — get the MP4 and the thumbnail.</p>
+      <p className="subtitle">
+        Paste a YouTube link — get the MP4 and the thumbnail.{' '}
+        <Link href="/playlist" style={{ color: 'inherit' }}>Got a playlist? →</Link>
+      </p>
 
       <form className="search-row" onSubmit={fetchInfo}>
         <input
