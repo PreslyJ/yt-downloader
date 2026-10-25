@@ -2,7 +2,7 @@ import ffmpegPath from 'ffmpeg-static';
 import { NextRequest, NextResponse } from 'next/server';
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createJob, markCompleted, markFailed, markFinished, markStarted } from '@/lib/progressStore';
 import { downloadToFile } from '@/lib/rangedDownload';
@@ -59,10 +59,12 @@ export async function POST(req: NextRequest) {
   let quality: string | undefined;
   let videos: SelectedVideo[] | undefined;
   let jobId: string | undefined;
+  let playlistTitle: string | undefined;
   try {
     const body = (await req.json()) as Record<string, unknown>;
     if (typeof body.quality === 'string') quality = body.quality;
     if (typeof body.jobId === 'string') jobId = body.jobId;
+    if (typeof body.playlistTitle === 'string') playlistTitle = body.playlistTitle;
     if (Array.isArray(body.videos)) {
       videos = body.videos
         .filter((v): v is { videoId: unknown; title: unknown } => typeof v === 'object' && v !== null)
@@ -89,9 +91,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'ffmpeg binary not available' }, { status: 500 });
   }
 
-  const outputDir = await mkdtemp(join(tmpdir(), 'ytdl-playlist-'));
-  createJob(jobId, selected.length, outputDir, (job) => {
-    void rm(job.outputDir, { recursive: true, force: true });
+  // Lands directly in the user's real Downloads folder, grouped under a
+  // playlist-named subfolder — not a temp dir the user has to go find.
+  // (Browsers sanitize a "/" in the <a download> attribute into "_" rather
+  // than creating a subfolder, so that trick doesn't work; writing the file
+  // server-side is what actually works since this runs on the user's own
+  // machine.)
+  const folderName = safeFilename(playlistTitle || 'Playlist');
+  const outputDir = join(homedir(), 'Downloads', folderName);
+  await mkdir(outputDir, { recursive: true });
+  createJob(jobId, selected.length, outputDir, () => {
+    // Real Downloads folder — never auto-delete it on job expiry.
   });
 
   const usedNames = new Set<string>();

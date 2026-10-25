@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { FormEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 
 interface PlaylistVideo {
   videoId: string;
@@ -48,8 +48,11 @@ function formatDuration(totalSeconds: number | null): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
-function fileUrl(jobId: string, videoId: string): string {
-  return `/api/playlist-download/file?jobId=${encodeURIComponent(jobId)}&videoId=${encodeURIComponent(videoId)}`;
+// Mirrors the server's safeFilename() so the folder name shown here matches
+// what actually gets created on disk.
+function sanitizeForDisplay(name: string): string {
+  const cleaned = name.replace(/[^\p{L}\p{N} _.-]/gu, '').trim().slice(0, 120);
+  return cleaned || 'Playlist';
 }
 
 export default function PlaylistPage() {
@@ -63,25 +66,11 @@ export default function PlaylistPage() {
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [progress, setProgress] = useState<JobProgress | null>(null);
-  const triggeredRef = useRef<Set<string>>(new Set());
-
-  // Each ready file auto-triggers its own browser download as soon as it
-  // shows up — so if the tab closes or the network drops mid-playlist,
-  // whatever already finished is already sitting in your Downloads folder,
-  // not lost inside one all-or-nothing archive.
-  useEffect(() => {
-    if (!jobId || !progress) return;
-    for (const file of progress.ready) {
-      if (triggeredRef.current.has(file.videoId)) continue;
-      triggeredRef.current.add(file.videoId);
-      const a = document.createElement('a');
-      a.href = fileUrl(jobId, file.videoId);
-      a.download = file.filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    }
-  }, [jobId, progress]);
+  // Each video is written straight to ~/Downloads/<playlist name>/ on the
+  // server as soon as it finishes (this app runs on your own machine, so
+  // "server" and "your Mac" are the same disk) — no browser download step
+  // needed, and no risk of losing finished videos if the tab closes or the
+  // network drops mid-playlist.
 
   useEffect(() => {
     if (!jobId || !downloading) return;
@@ -138,16 +127,15 @@ export default function PlaylistPage() {
   }
 
   async function runDownload(videos: Array<{ videoId: string; title: string }>) {
-    if (videos.length === 0) return;
+    if (videos.length === 0 || !info) return;
     setDownloadError(null);
-    triggeredRef.current = new Set();
     const newJobId = crypto.randomUUID();
 
     try {
       const res = await fetch('/api/playlist-download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ videos, quality, jobId: newJobId }),
+        body: JSON.stringify({ videos, quality, jobId: newJobId, playlistTitle: info.title }),
       });
       const data = (await res.json()) as { error?: string; total?: number };
       if (!res.ok) throw new Error(data.error ?? `Failed to start (HTTP ${res.status})`);
@@ -248,18 +236,13 @@ export default function PlaylistPage() {
               )}
               {progress.finished && (
                 <p style={{ color: 'var(--muted)', fontSize: '0.8rem', marginTop: 6 }}>
-                  Done. Each finished video already triggered its own download — check your
-                  Downloads folder. If your browser blocked some as pop-ups, use the links below.
+                  Done. Saved to ~/Downloads/{info?.title ? sanitizeForDisplay(info.title) : 'Playlist'}/
                 </p>
               )}
-              {progress.ready.length > 0 && jobId && (
+              {progress.ready.length > 0 && (
                 <ul style={{ marginTop: 10, paddingLeft: 18, fontSize: '0.85rem' }}>
                   {progress.ready.map((f) => (
-                    <li key={f.videoId}>
-                      <a href={fileUrl(jobId, f.videoId)} download={f.filename} style={{ color: 'inherit' }}>
-                        {f.filename}
-                      </a>
-                    </li>
+                    <li key={f.videoId}>{f.filename}</li>
                   ))}
                 </ul>
               )}
