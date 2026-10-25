@@ -26,11 +26,22 @@ export const maxDuration = 800;
 // slow progress and random connection resets, not a YouTube-side limit.
 const VIDEO_CONCURRENCY = 2;
 
+// Connection resets are often a one-off blip (confirmed: videos that failed
+// outright on a first pass succeeded cleanly when simply retried a minute
+// later with nothing else changed) rather than a permanent block, so retry
+// the whole video a couple of times before giving up on it.
+const VIDEO_RETRY_ATTEMPTS = 3;
+const VIDEO_RETRY_DELAY_MS = 2000;
+
 const VIDEO_ID_PATTERN = /^[\w-]{11}$/;
 
 interface SelectedVideo {
   videoId: string;
   title: string;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function runPool<T>(items: T[], limit: number, worker: (item: T, index: number) => Promise<void>): Promise<void> {
@@ -102,18 +113,31 @@ export async function POST(req: NextRequest) {
       await runPool(selected, VIDEO_CONCURRENCY, async (video, index) => {
         const workDir = join(workRoot, video.videoId);
         markStarted(jobId!, video.videoId, video.title);
-        try {
-          const { tempOutFile, title } = await processVideo({ video, quality, workDir });
-          const filename = nameFor(index, title);
-          const finalPath = join(outputDir, filename);
-          await rename(tempOutFile, finalPath);
-          markCompleted(jobId!, video.videoId, finalPath, filename);
-        } catch (err) {
-          console.error(`playlist item failed (${video.videoId}):`, err);
-          markFailed(jobId!, video.videoId);
-        } finally {
-          await rm(workDir, { recursive: true, force: true });
+
+        let lastErr: unknown;
+        for (let attempt = 1; attempt <= VIDEO_RETRY_ATTEMPTS; attempt++) {
+          try {
+            const { tempOutFile, title } = await processVideo({ video, quality, workDir });
+            const filename = nameFor(index, title);
+            const finalPath = join(outputDir, filename);
+            await rename(tempOutFile, finalPath);
+            markCompleted(jobId!, video.videoId, finalPath, filename);
+            lastErr = undefined;
+            break;
+          } catch (err) {
+            lastErr = err;
+            if (attempt < VIDEO_RETRY_ATTEMPTS) {
+              console.error(`playlist item attempt ${attempt} failed (${video.videoId}), retrying:`, err);
+              await rm(workDir, { recursive: true, force: true }).catch(() => {});
+              await sleep(VIDEO_RETRY_DELAY_MS);
+            }
+          }
         }
+        if (lastErr) {
+          console.error(`playlist item failed after ${VIDEO_RETRY_ATTEMPTS} attempts (${video.videoId}):`, lastErr);
+          markFailed(jobId!, video.videoId, video.title);
+        }
+        await rm(workDir, { recursive: true, force: true }).catch(() => {});
       });
     } finally {
       markFinished(jobId!);

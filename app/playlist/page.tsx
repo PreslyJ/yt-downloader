@@ -21,6 +21,11 @@ interface ReadyFile {
   filename: string;
 }
 
+interface FailedVideo {
+  videoId: string;
+  title: string;
+}
+
 interface JobProgress {
   total: number;
   completed: number;
@@ -28,6 +33,7 @@ interface JobProgress {
   activeTitles: string[];
   finished: boolean;
   ready: ReadyFile[];
+  failedVideos: FailedVideo[];
 }
 
 const QUALITIES = ['1080p', '720p', '480p', '360p', '240p', '144p'];
@@ -131,12 +137,11 @@ export default function PlaylistPage() {
     setSelected((prev) => (prev.size === info.videos.length ? new Set() : new Set(info.videos.map((v) => v.videoId))));
   }
 
-  async function startDownload() {
-    if (!info || selected.size === 0) return;
+  async function runDownload(videos: Array<{ videoId: string; title: string }>) {
+    if (videos.length === 0) return;
     setDownloadError(null);
     triggeredRef.current = new Set();
     const newJobId = crypto.randomUUID();
-    const videos = info.videos.filter((v) => selected.has(v.videoId)).map((v) => ({ videoId: v.videoId, title: v.title }));
 
     try {
       const res = await fetch('/api/playlist-download', {
@@ -147,11 +152,30 @@ export default function PlaylistPage() {
       const data = (await res.json()) as { error?: string; total?: number };
       if (!res.ok) throw new Error(data.error ?? `Failed to start (HTTP ${res.status})`);
       setJobId(newJobId);
-      setProgress({ total: data.total ?? videos.length, completed: 0, failed: 0, activeTitles: [], finished: false, ready: [] });
+      setProgress({
+        total: data.total ?? videos.length,
+        completed: 0,
+        failed: 0,
+        activeTitles: [],
+        finished: false,
+        ready: [],
+        failedVideos: [],
+      });
       setDownloading(true);
     } catch (err) {
       setDownloadError(err instanceof Error ? err.message : 'Failed to start download');
     }
+  }
+
+  function startDownload() {
+    if (!info || selected.size === 0) return;
+    const videos = info.videos.filter((v) => selected.has(v.videoId)).map((v) => ({ videoId: v.videoId, title: v.title }));
+    void runDownload(videos);
+  }
+
+  function retryFailed() {
+    if (!progress || progress.failedVideos.length === 0) return;
+    void runDownload(progress.failedVideos);
   }
 
   const doneCount = progress ? progress.completed + progress.failed : 0;
@@ -238,6 +262,22 @@ export default function PlaylistPage() {
                     </li>
                   ))}
                 </ul>
+              )}
+              {progress.finished && progress.failedVideos.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <p style={{ color: '#ffb4b4', fontSize: '0.85rem', marginBottom: 6 }}>
+                    These kept failing even after automatic retries (usually a one-off dropped
+                    connection) — try again:
+                  </p>
+                  <ul style={{ paddingLeft: 18, fontSize: '0.85rem', marginBottom: 8 }}>
+                    {progress.failedVideos.map((v) => (
+                      <li key={v.videoId}>{v.title}</li>
+                    ))}
+                  </ul>
+                  <button type="button" className="btn-secondary" onClick={retryFailed} disabled={downloading}>
+                    ↻ Retry {progress.failedVideos.length} failed
+                  </button>
+                </div>
               )}
             </div>
           )}
