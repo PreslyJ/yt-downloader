@@ -8,6 +8,7 @@ interface PlaylistVideo {
   title: string;
   thumbnail: string | null;
   durationSeconds: number | null;
+  alreadyDownloaded: boolean;
 }
 
 interface PlaylistInfo {
@@ -104,7 +105,10 @@ export default function PlaylistPage() {
       const data = (await res.json()) as PlaylistInfo & { error?: string };
       if (!res.ok) throw new Error(data.error ?? 'Something went wrong');
       setInfo(data);
-      setSelected(new Set(data.videos.map((v) => v.videoId)));
+      // Already-downloaded videos (tracked via a manifest file in the
+      // playlist's Downloads folder, so this survives app/laptop restarts)
+      // start unchecked — re-fetching and downloading only grabs what's missing.
+      setSelected(new Set(data.videos.filter((v) => !v.alreadyDownloaded).map((v) => v.videoId)));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
     } finally {
@@ -126,7 +130,7 @@ export default function PlaylistPage() {
     setSelected((prev) => (prev.size === info.videos.length ? new Set() : new Set(info.videos.map((v) => v.videoId))));
   }
 
-  async function runDownload(videos: Array<{ videoId: string; title: string }>) {
+  async function runDownload(videos: Array<{ videoId: string; title: string; position?: number }>) {
     if (videos.length === 0 || !info) return;
     setDownloadError(null);
     const newJobId = crypto.randomUUID();
@@ -157,7 +161,9 @@ export default function PlaylistPage() {
 
   function startDownload() {
     if (!info || selected.size === 0) return;
-    const videos = info.videos.filter((v) => selected.has(v.videoId)).map((v) => ({ videoId: v.videoId, title: v.title }));
+    const videos = info.videos
+      .map((v, i) => ({ videoId: v.videoId, title: v.title, position: i + 1 }))
+      .filter((v) => selected.has(v.videoId));
     void runDownload(videos);
   }
 
@@ -272,7 +278,14 @@ export default function PlaylistPage() {
               <label
                 key={video.videoId}
                 className="card"
-                style={{ display: 'flex', alignItems: 'center', gap: 12, padding: 10, cursor: 'pointer' }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 12,
+                  padding: 10,
+                  cursor: 'pointer',
+                  opacity: video.alreadyDownloaded ? 0.55 : 1,
+                }}
               >
                 <input
                   type="checkbox"
@@ -286,6 +299,9 @@ export default function PlaylistPage() {
                   <img src={video.thumbnail} alt="" style={{ width: 96, aspectRatio: '16/9', objectFit: 'cover', borderRadius: 6 }} />
                 )}
                 <span style={{ flex: 1 }}>{video.title}</span>
+                {video.alreadyDownloaded && (
+                  <span style={{ color: '#4caf50', fontSize: '0.8rem' }}>✓ downloaded</span>
+                )}
                 <span style={{ color: 'var(--muted)', fontSize: '0.85rem' }}>{formatDuration(video.durationSeconds)}</span>
               </label>
             ))}

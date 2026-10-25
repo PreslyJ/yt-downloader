@@ -4,6 +4,8 @@ import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { access } from 'node:fs/promises';
+import { getManifestEntry, recordDownloaded } from '@/lib/manifest';
 import { createJob, markCompleted, markFailed, markFinished, markStarted } from '@/lib/progressStore';
 import { downloadToFile } from '@/lib/rangedDownload';
 import { USER_AGENT, getPlayerData, pickAudioFormat, safeFilename } from '@/lib/youtube';
@@ -38,6 +40,7 @@ const VIDEO_ID_PATTERN = /^[\w-]{11}$/;
 interface SelectedVideo {
   videoId: string;
   title: string;
+  position?: number;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -67,10 +70,11 @@ export async function POST(req: NextRequest) {
     if (typeof body.playlistTitle === 'string') playlistTitle = body.playlistTitle;
     if (Array.isArray(body.videos)) {
       videos = body.videos
-        .filter((v): v is { videoId: unknown; title: unknown } => typeof v === 'object' && v !== null)
+        .filter((v): v is { videoId: unknown; title: unknown; position: unknown } => typeof v === 'object' && v !== null)
         .map((v) => ({
           videoId: typeof v.videoId === 'string' ? v.videoId : '',
           title: typeof v.title === 'string' ? v.title : '',
+          position: typeof v.position === 'number' ? v.position : undefined,
         }))
         .filter((v) => VIDEO_ID_PATTERN.test(v.videoId));
     }
@@ -121,6 +125,21 @@ export async function POST(req: NextRequest) {
     const workRoot = await mkdtemp(join(tmpdir(), 'ytdl-work-'));
     try {
       await runPool(selected, VIDEO_CONCURRENCY, async (video, index) => {
+        // Server-side safety net: skip straight to "done" if this video is
+        // already in the manifest *and* the file is actually still there —
+        // protects against re-downloading even if the client resubmits an
+        // already-downloaded video (e.g. "Select all" after a partial run).
+        const existing = await getManifestEntry(outputDir, video.videoId);
+        if (existing) {
+          const existingPath = join(outputDir, existing.filename);
+          const stillThere = await access(existingPath).then(() => true).catch(() => false);
+          if (stillThere) {
+            markStarted(jobId!, video.videoId, video.title);
+            markCompleted(jobId!, video.videoId, existingPath, existing.filename);
+            return;
+          }
+        }
+
         const workDir = join(workRoot, video.videoId);
         markStarted(jobId!, video.videoId, video.title);
 
@@ -128,9 +147,10 @@ export async function POST(req: NextRequest) {
         for (let attempt = 1; attempt <= VIDEO_RETRY_ATTEMPTS; attempt++) {
           try {
             const { tempOutFile, title } = await processVideo({ video, quality, workDir });
-            const filename = nameFor(index, title);
+            const filename = nameFor((video.position ?? index + 1) - 1, title);
             const finalPath = join(outputDir, filename);
             await rename(tempOutFile, finalPath);
+            await recordDownloaded(outputDir, video.videoId, filename, title);
             markCompleted(jobId!, video.videoId, finalPath, filename);
             lastErr = undefined;
             break;
