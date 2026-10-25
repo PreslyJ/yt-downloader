@@ -16,6 +16,14 @@ interface PlaylistInfo {
   videos: PlaylistVideo[];
 }
 
+interface JobProgress {
+  total: number;
+  completed: number;
+  failed: number;
+  currentTitle: string | null;
+  finished: boolean;
+}
+
 const QUALITIES = ['1080p', '720p', '480p', '360p', '240p', '144p'];
 
 function formatDuration(totalSeconds: number | null): string {
@@ -37,6 +45,7 @@ export default function PlaylistPage() {
   const [quality, setQuality] = useState(QUALITIES[1]);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<JobProgress | null>(null);
 
   async function fetchPlaylist(e: FormEvent) {
     e.preventDefault();
@@ -79,11 +88,23 @@ export default function PlaylistPage() {
     if (!info || selected.size === 0) return;
     setDownloading(true);
     setDownloadError(null);
+    setProgress({ total: selected.size, completed: 0, failed: 0, currentTitle: null, finished: false });
+
+    const jobId = crypto.randomUUID();
+    const pollInterval = setInterval(() => {
+      fetch(`/api/playlist-progress?jobId=${jobId}`)
+        .then((r) => (r.ok ? (r.json() as Promise<JobProgress>) : null))
+        .then((data) => {
+          if (data) setProgress(data);
+        })
+        .catch(() => {});
+    }, 1000);
+
     try {
       const res = await fetch('/api/playlist-download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, quality, videoIds: [...selected] }),
+        body: JSON.stringify({ url, quality, videoIds: [...selected], jobId }),
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -101,6 +122,7 @@ export default function PlaylistPage() {
     } catch (err) {
       setDownloadError(err instanceof Error ? err.message : 'Download failed');
     } finally {
+      clearInterval(pollInterval);
       setDownloading(false);
     }
   }
@@ -141,11 +163,41 @@ export default function PlaylistPage() {
               ))}
             </select>
             <button type="button" className="btn" onClick={downloadAll} disabled={downloading || selected.size === 0}>
-              {downloading
-                ? 'Downloading… (this can take a while for large playlists)'
-                : `⬇ Download ${selected.size} as ZIP`}
+              {downloading ? 'Downloading…' : `⬇ Download ${selected.size} as ZIP`}
             </button>
           </div>
+
+          {progress && (
+            <div className="card" style={{ padding: 14, marginBottom: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: '0.9rem' }}>
+                <span>
+                  {progress.completed + progress.failed} / {progress.total} videos
+                  {progress.failed > 0 && <span style={{ color: '#ffb4b4' }}> ({progress.failed} failed)</span>}
+                </span>
+                <span>{Math.round(((progress.completed + progress.failed) / Math.max(1, progress.total)) * 100)}%</span>
+              </div>
+              <div style={{ height: 8, borderRadius: 4, background: 'var(--bg)', overflow: 'hidden' }}>
+                <div
+                  style={{
+                    height: '100%',
+                    width: `${((progress.completed + progress.failed) / Math.max(1, progress.total)) * 100}%`,
+                    background: progress.finished ? '#4caf50' : 'var(--accent)',
+                    transition: 'width 0.3s ease',
+                  }}
+                />
+              </div>
+              {progress.currentTitle && !progress.finished && (
+                <p style={{ color: 'var(--muted)', fontSize: '0.8rem', marginTop: 6 }}>
+                  Working on: {progress.currentTitle}
+                </p>
+              )}
+              {progress.finished && (
+                <p style={{ color: 'var(--muted)', fontSize: '0.8rem', marginTop: 6 }}>
+                  All done — zipping and sending to your browser now…
+                </p>
+              )}
+            </div>
+          )}
 
           <h2 style={{ marginBottom: 12 }}>{info.title} ({info.videos.length} videos)</h2>
 

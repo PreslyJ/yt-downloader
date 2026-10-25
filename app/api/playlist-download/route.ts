@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { extractPlaylistId, getPlaylistInfo } from '@/lib/playlist';
+import { createJob, markCompleted, markFailed, markFinished, setCurrentTitle } from '@/lib/progressStore';
 import { downloadToFile } from '@/lib/rangedDownload';
 import { USER_AGENT, contentDisposition, getPlayerData, pickAudioFormat, safeFilename } from '@/lib/youtube';
 
@@ -34,11 +35,13 @@ export async function POST(req: NextRequest) {
   let url: string | undefined;
   let quality: string | undefined;
   let videoIds: string[] | undefined;
+  let jobId: string | undefined;
   try {
     const body = (await req.json()) as Record<string, unknown>;
     if (typeof body.url === 'string') url = body.url;
     if (typeof body.quality === 'string') quality = body.quality;
     if (Array.isArray(body.videoIds)) videoIds = body.videoIds.filter((v): v is string => typeof v === 'string');
+    if (typeof body.jobId === 'string') jobId = body.jobId;
   } catch {
     // fall through to validation error
   }
@@ -64,6 +67,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'No videos selected' }, { status: 400 });
   }
 
+  if (jobId) createJob(jobId, selected.length);
+
   const rootDir = await mkdtemp(join(tmpdir(), 'ytdl-playlist-'));
   const passthrough = new PassThrough();
   const archive = new ZipArchive({ zlib: { level: 6 } });
@@ -88,10 +93,13 @@ export async function POST(req: NextRequest) {
     try {
       await runPool(selected, VIDEO_CONCURRENCY, async (video, index) => {
         const workDir = join(rootDir, video.videoId);
+        if (jobId) setCurrentTitle(jobId, video.title);
         try {
           await processVideo({ video, index, quality, workDir, archive, nameFor });
+          if (jobId) markCompleted(jobId);
         } catch (err) {
           console.error(`playlist item failed (${video.videoId}):`, err);
+          if (jobId) markFailed(jobId);
           archive.append(
             `Failed: ${err instanceof Error ? err.message : 'unknown error'}\n`,
             { name: `${String(index + 1).padStart(3, '0')} - ${safeFilename(video.title)} (FAILED).txt` },
@@ -103,6 +111,7 @@ export async function POST(req: NextRequest) {
       });
     } finally {
       await archive.finalize();
+      if (jobId) markFinished(jobId);
       await rm(rootDir, { recursive: true, force: true });
     }
   };
