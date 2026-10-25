@@ -5,7 +5,7 @@ const nextConfig = {
   },
   experimental: {
     // Keep ffmpeg-static unbundled so its __dirname-relative binary path resolves.
-    serverComponentsExternalPackages: ['ffmpeg-static', 'undici', 'archiver'],
+    serverComponentsExternalPackages: ['ffmpeg-static', 'undici'],
     // Make sure Vercel's function bundler ships the ffmpeg binary.
     outputFileTracingIncludes: {
       '/api/download': ['./node_modules/ffmpeg-static/ffmpeg'],

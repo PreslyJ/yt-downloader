@@ -7,8 +7,32 @@ import { USER_AGENT } from './youtube';
 // concurrent range requests gets several throttled connections running at
 // once instead of one — same trick yt-dlp uses. Verified: ~15x speedup on
 // the iOS app using the identical technique.
-const CHUNK_COUNT = 6;
+const CHUNK_COUNT = 4;
 const RANGED_THRESHOLD = 3_000_000; // below this, splitting isn't worth the overhead
+const MAX_ATTEMPTS = 2;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// googlevideo.com connections reset under concurrent load — empirically,
+// *more* parallel chunks/videos means *more* of these, not fewer overall
+// failures (verified: 2/6 videos failed at 4-way video concurrency, 3/6
+// failed at 6-way). The CDN, not the CPU or network bandwidth, is the real
+// constraint, so retrying a transient drop is far more valuable than adding
+// raw parallelism — most of these recover instantly on retry.
+async function withRetry<T>(label: string, attempt: () => Promise<T>): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < MAX_ATTEMPTS; i++) {
+    try {
+      return await attempt();
+    } catch (err) {
+      lastErr = err;
+      if (i < MAX_ATTEMPTS - 1) await sleep(300 * 2 ** i);
+    }
+  }
+  throw new Error(`${label} failed after ${MAX_ATTEMPTS} attempts: ${lastErr instanceof Error ? lastErr.message : lastErr}`);
+}
 
 export async function downloadToFile(url: string, destPath: string, contentLength?: number | null): Promise<void> {
   if (contentLength && contentLength >= RANGED_THRESHOLD) {
@@ -23,9 +47,12 @@ export async function downloadToFile(url: string, destPath: string, contentLengt
 }
 
 async function downloadSingle(url: string, destPath: string): Promise<void> {
-  const res = await ytFetch(url, { headers: { 'User-Agent': USER_AGENT } });
-  if (!res.ok || !res.body) throw new Error(`Download failed (HTTP ${res.status})`);
-  await writeFile(destPath, Buffer.from(await res.arrayBuffer()));
+  const buffer = await withRetry('download', async () => {
+    const res = await ytFetch(url, { headers: { 'User-Agent': USER_AGENT } });
+    if (!res.ok || !res.body) throw new Error(`Download failed (HTTP ${res.status})`);
+    return Buffer.from(await res.arrayBuffer());
+  });
+  await writeFile(destPath, buffer);
 }
 
 async function downloadRanged(url: string, destPath: string, contentLength: number): Promise<void> {
@@ -37,13 +64,15 @@ async function downloadRanged(url: string, destPath: string, contentLength: numb
   });
 
   const chunks = await Promise.all(
-    ranges.map(async ({ start, end }, index) => {
-      const res = await ytFetch(url, {
-        headers: { 'User-Agent': USER_AGENT, Range: `bytes=${start}-${end}` },
-      });
-      if (!res.ok) throw new Error(`Range chunk ${index} failed (HTTP ${res.status})`);
-      return Buffer.from(await res.arrayBuffer());
-    }),
+    ranges.map(({ start, end }, index) =>
+      withRetry(`range chunk ${index}`, async () => {
+        const res = await ytFetch(url, {
+          headers: { 'User-Agent': USER_AGENT, Range: `bytes=${start}-${end}` },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return Buffer.from(await res.arrayBuffer());
+      }),
+    ),
   );
   await writeFile(destPath, Buffer.concat(chunks));
 }

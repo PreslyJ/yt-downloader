@@ -1,24 +1,37 @@
-import { ZipArchive } from 'archiver';
 import ffmpegPath from 'ffmpeg-static';
 import { NextRequest, NextResponse } from 'next/server';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PassThrough } from 'node:stream';
-import { extractPlaylistId, getPlaylistInfo } from '@/lib/playlist';
 import { createJob, markCompleted, markFailed, markFinished, markStarted } from '@/lib/progressStore';
 import { downloadToFile } from '@/lib/rangedDownload';
-import { USER_AGENT, contentDisposition, getPlayerData, pickAudioFormat, safeFilename } from '@/lib/youtube';
+import { USER_AGENT, getPlayerData, pickAudioFormat, safeFilename } from '@/lib/youtube';
 
 export const runtime = 'nodejs';
 export const maxDuration = 800;
 
-// Videos are processed several at a time (not one by one), and each video's
-// own video+audio streams are *also* pulled with the ranged-chunk downloader
-// (several parallel connections per stream, bypassing YouTube's per-connection
-// throttle) — two layers of parallelism stacked for playlist speed.
-const VIDEO_CONCURRENCY = 4;
+// Each video is its own independent file, written to disk and marked ready
+// the moment it finishes — not bundled into one all-or-nothing zip. If the
+// browser or network drops mid-playlist, everything already finished is
+// already a real completed download; only what hadn't started yet is lost.
+// This endpoint just kicks the job off and returns immediately; the actual
+// work continues in the background regardless of whether this HTTP
+// connection stays open, and progress/files are pulled separately.
+// Tuned against this machine's actual measured bandwidth (~24 Mbps / 3 MB/s —
+// a genuinely modest home connection), not a theoretical "more parallelism is
+// always faster" assumption. Each video's own 4-way chunked download can pull
+// several hundred KB/s on its own; stacking too many videos *and* too many
+// chunks each on top of that oversubscribes the real pipe, which looks like
+// slow progress and random connection resets, not a YouTube-side limit.
+const VIDEO_CONCURRENCY = 2;
+
+const VIDEO_ID_PATTERN = /^[\w-]{11}$/;
+
+interface SelectedVideo {
+  videoId: string;
+  title: string;
+}
 
 async function runPool<T>(items: T[], limit: number, worker: (item: T, index: number) => Promise<void>): Promise<void> {
   let cursor = 0;
@@ -32,49 +45,43 @@ async function runPool<T>(items: T[], limit: number, worker: (item: T, index: nu
 }
 
 export async function POST(req: NextRequest) {
-  let url: string | undefined;
   let quality: string | undefined;
-  let videoIds: string[] | undefined;
+  let videos: SelectedVideo[] | undefined;
   let jobId: string | undefined;
   try {
     const body = (await req.json()) as Record<string, unknown>;
-    if (typeof body.url === 'string') url = body.url;
     if (typeof body.quality === 'string') quality = body.quality;
-    if (Array.isArray(body.videoIds)) videoIds = body.videoIds.filter((v): v is string => typeof v === 'string');
     if (typeof body.jobId === 'string') jobId = body.jobId;
+    if (Array.isArray(body.videos)) {
+      videos = body.videos
+        .filter((v): v is { videoId: unknown; title: unknown } => typeof v === 'object' && v !== null)
+        .map((v) => ({
+          videoId: typeof v.videoId === 'string' ? v.videoId : '',
+          title: typeof v.title === 'string' ? v.title : '',
+        }))
+        .filter((v) => VIDEO_ID_PATTERN.test(v.videoId));
+    }
   } catch {
     // fall through to validation error
   }
 
-  const playlistId = url ? extractPlaylistId(url) : null;
-  if (!playlistId) {
-    return NextResponse.json({ error: 'Not a valid YouTube playlist URL' }, { status: 400 });
+  // Takes the video list straight from the client — it already has this from
+  // when it called /api/playlist-info. Re-walking the whole playlist here
+  // would mean several sequential continuation-page fetches (each depends on
+  // the previous page's token, so they can't run in parallel) before any
+  // video download even starts.
+  const selected = videos ?? [];
+  if (selected.length === 0 || !jobId) {
+    return NextResponse.json({ error: 'No videos selected' }, { status: 400 });
   }
   if (!ffmpegPath) {
     return NextResponse.json({ error: 'ffmpeg binary not available' }, { status: 500 });
   }
 
-  let info;
-  try {
-    info = await getPlaylistInfo(playlistId);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Failed to fetch playlist info';
-    return NextResponse.json({ error: message }, { status: 502 });
-  }
-
-  const selected = videoIds ? info.videos.filter((v) => videoIds.includes(v.videoId)) : info.videos;
-  if (selected.length === 0) {
-    return NextResponse.json({ error: 'No videos selected' }, { status: 400 });
-  }
-
-  if (jobId) createJob(jobId, selected.length);
-
-  const rootDir = await mkdtemp(join(tmpdir(), 'ytdl-playlist-'));
-  const passthrough = new PassThrough();
-  const archive = new ZipArchive({ zlib: { level: 6 } });
-  archive.on('warning', (err) => console.error('archiver warning:', err));
-  archive.on('error', (err) => passthrough.destroy(err));
-  archive.pipe(passthrough);
+  const outputDir = await mkdtemp(join(tmpdir(), 'ytdl-playlist-'));
+  createJob(jobId, selected.length, outputDir, (job) => {
+    void rm(job.outputDir, { recursive: true, force: true });
+  });
 
   const usedNames = new Set<string>();
   const nameFor = (index: number, title: string) => {
@@ -90,53 +97,41 @@ export async function POST(req: NextRequest) {
   };
 
   const run = async () => {
+    const workRoot = await mkdtemp(join(tmpdir(), 'ytdl-work-'));
     try {
       await runPool(selected, VIDEO_CONCURRENCY, async (video, index) => {
-        const workDir = join(rootDir, video.videoId);
-        if (jobId) markStarted(jobId, video.videoId, video.title);
+        const workDir = join(workRoot, video.videoId);
+        markStarted(jobId!, video.videoId, video.title);
         try {
-          await processVideo({ video, index, quality, workDir, archive, nameFor });
-          if (jobId) markCompleted(jobId, video.videoId);
+          const { tempOutFile, title } = await processVideo({ video, quality, workDir });
+          const filename = nameFor(index, title);
+          const finalPath = join(outputDir, filename);
+          await rename(tempOutFile, finalPath);
+          markCompleted(jobId!, video.videoId, finalPath, filename);
         } catch (err) {
           console.error(`playlist item failed (${video.videoId}):`, err);
-          if (jobId) markFailed(jobId, video.videoId);
-          archive.append(
-            `Failed: ${err instanceof Error ? err.message : 'unknown error'}\n`,
-            { name: `${String(index + 1).padStart(3, '0')} - ${safeFilename(video.title)} (FAILED).txt` },
-          );
+          markFailed(jobId!, video.videoId);
+        } finally {
+          await rm(workDir, { recursive: true, force: true });
         }
-        // Per-video temp files are cleaned up once at the end, after
-        // archive.finalize() resolves — archiver reads file contents
-        // lazily/asynchronously, so deleting them earlier races the zip write.
       });
     } finally {
-      await archive.finalize();
-      if (jobId) markFinished(jobId);
-      await rm(rootDir, { recursive: true, force: true });
+      markFinished(jobId!);
+      await rm(workRoot, { recursive: true, force: true });
     }
   };
   void run();
 
-  const filename = `${safeFilename(info.title)}.zip`;
-  return new NextResponse(passthrough as unknown as ReadableStream, {
-    headers: {
-      'Content-Type': 'application/zip',
-      'Content-Disposition': contentDisposition(filename),
-    },
-  });
+  return NextResponse.json({ jobId, total: selected.length });
 }
 
 interface ProcessArgs {
-  video: { videoId: string; title: string; thumbnail: string | null };
-  index: number;
+  video: SelectedVideo;
   quality: string | undefined;
   workDir: string;
-  archive: ZipArchive;
-  nameFor: (index: number, title: string) => string;
 }
 
-async function processVideo({ video, index, quality, workDir, archive, nameFor }: ProcessArgs): Promise<void> {
-  const { mkdir } = await import('node:fs/promises');
+async function processVideo({ video, quality, workDir }: ProcessArgs): Promise<{ tempOutFile: string; title: string }> {
   await mkdir(workDir, { recursive: true });
 
   const player = await getPlayerData(video.videoId);
@@ -200,5 +195,5 @@ async function processVideo({ video, index, quality, workDir, archive, nameFor }
     ffmpeg.on('error', reject);
   });
 
-  archive.file(outFile, { name: nameFor(index, player.title || video.title) });
+  return { tempOutFile: outFile, title: player.title || video.title };
 }

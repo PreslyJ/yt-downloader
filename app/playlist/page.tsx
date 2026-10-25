@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { FormEvent, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 
 interface PlaylistVideo {
   videoId: string;
@@ -16,12 +16,18 @@ interface PlaylistInfo {
   videos: PlaylistVideo[];
 }
 
+interface ReadyFile {
+  videoId: string;
+  filename: string;
+}
+
 interface JobProgress {
   total: number;
   completed: number;
   failed: number;
   activeTitles: string[];
   finished: boolean;
+  ready: ReadyFile[];
 }
 
 const QUALITIES = ['1080p', '720p', '480p', '360p', '240p', '144p'];
@@ -36,6 +42,10 @@ function formatDuration(totalSeconds: number | null): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
+function fileUrl(jobId: string, videoId: string): string {
+  return `/api/playlist-download/file?jobId=${encodeURIComponent(jobId)}&videoId=${encodeURIComponent(videoId)}`;
+}
+
 export default function PlaylistPage() {
   const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
@@ -45,7 +55,42 @@ export default function PlaylistPage() {
   const [quality, setQuality] = useState(QUALITIES[1]);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
   const [progress, setProgress] = useState<JobProgress | null>(null);
+  const triggeredRef = useRef<Set<string>>(new Set());
+
+  // Each ready file auto-triggers its own browser download as soon as it
+  // shows up — so if the tab closes or the network drops mid-playlist,
+  // whatever already finished is already sitting in your Downloads folder,
+  // not lost inside one all-or-nothing archive.
+  useEffect(() => {
+    if (!jobId || !progress) return;
+    for (const file of progress.ready) {
+      if (triggeredRef.current.has(file.videoId)) continue;
+      triggeredRef.current.add(file.videoId);
+      const a = document.createElement('a');
+      a.href = fileUrl(jobId, file.videoId);
+      a.download = file.filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+  }, [jobId, progress]);
+
+  useEffect(() => {
+    if (!jobId || !downloading) return;
+    const interval = setInterval(() => {
+      fetch(`/api/playlist-progress?jobId=${jobId}`)
+        .then((r) => (r.ok ? (r.json() as Promise<JobProgress>) : null))
+        .then((data) => {
+          if (!data) return;
+          setProgress(data);
+          if (data.finished) setDownloading(false);
+        })
+        .catch(() => {});
+    }, 1200);
+    return () => clearInterval(interval);
+  }, [jobId, downloading]);
 
   async function fetchPlaylist(e: FormEvent) {
     e.preventDefault();
@@ -53,6 +98,8 @@ export default function PlaylistPage() {
     setError(null);
     setInfo(null);
     setDownloadError(null);
+    setJobId(null);
+    setProgress(null);
     try {
       const res = await fetch('/api/playlist-info', {
         method: 'POST',
@@ -84,54 +131,38 @@ export default function PlaylistPage() {
     setSelected((prev) => (prev.size === info.videos.length ? new Set() : new Set(info.videos.map((v) => v.videoId))));
   }
 
-  async function downloadAll() {
+  async function startDownload() {
     if (!info || selected.size === 0) return;
-    setDownloading(true);
     setDownloadError(null);
-    setProgress({ total: selected.size, completed: 0, failed: 0, activeTitles: [], finished: false });
-
-    const jobId = crypto.randomUUID();
-    const pollInterval = setInterval(() => {
-      fetch(`/api/playlist-progress?jobId=${jobId}`)
-        .then((r) => (r.ok ? (r.json() as Promise<JobProgress>) : null))
-        .then((data) => {
-          if (data) setProgress(data);
-        })
-        .catch(() => {});
-    }, 1000);
+    triggeredRef.current = new Set();
+    const newJobId = crypto.randomUUID();
+    const videos = info.videos.filter((v) => selected.has(v.videoId)).map((v) => ({ videoId: v.videoId, title: v.title }));
 
     try {
       const res = await fetch('/api/playlist-download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, quality, videoIds: [...selected], jobId }),
+        body: JSON.stringify({ videos, quality, jobId: newJobId }),
       });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(data?.error ?? `Download failed (HTTP ${res.status})`);
-      }
-      const blob = await res.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = objectUrl;
-      a.download = `${info.title}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(objectUrl);
+      const data = (await res.json()) as { error?: string; total?: number };
+      if (!res.ok) throw new Error(data.error ?? `Failed to start (HTTP ${res.status})`);
+      setJobId(newJobId);
+      setProgress({ total: data.total ?? videos.length, completed: 0, failed: 0, activeTitles: [], finished: false, ready: [] });
+      setDownloading(true);
     } catch (err) {
-      setDownloadError(err instanceof Error ? err.message : 'Download failed');
-    } finally {
-      clearInterval(pollInterval);
-      setDownloading(false);
+      setDownloadError(err instanceof Error ? err.message : 'Failed to start download');
     }
   }
+
+  const doneCount = progress ? progress.completed + progress.failed : 0;
+  const totalCount = progress?.total ?? 0;
 
   return (
     <main>
       <h1>▶ Playlist Downloader</h1>
       <p className="subtitle">
-        Paste a YouTube playlist link — get every video as one ZIP, downloaded in parallel.{' '}
+        Paste a YouTube playlist link — each video downloads individually, as its own file, the
+        moment it&apos;s ready.{' '}
         <Link href="/" style={{ color: 'inherit' }}>Single video? →</Link>
       </p>
 
@@ -154,16 +185,16 @@ export default function PlaylistPage() {
       {info && (
         <>
           <div className="controls" style={{ marginBottom: 16 }}>
-            <button type="button" className="btn-secondary" onClick={toggleAll}>
+            <button type="button" className="btn-secondary" onClick={toggleAll} disabled={downloading}>
               {selected.size === info.videos.length ? 'Deselect all' : 'Select all'}
             </button>
-            <select value={quality} onChange={(e) => setQuality(e.target.value)}>
+            <select value={quality} onChange={(e) => setQuality(e.target.value)} disabled={downloading}>
               {QUALITIES.map((q) => (
                 <option key={q} value={q}>{q}</option>
               ))}
             </select>
-            <button type="button" className="btn" onClick={downloadAll} disabled={downloading || selected.size === 0}>
-              {downloading ? 'Downloading…' : `⬇ Download ${selected.size} as ZIP`}
+            <button type="button" className="btn" onClick={startDownload} disabled={downloading || selected.size === 0}>
+              {downloading ? 'Downloading…' : `⬇ Download ${selected.size} videos`}
             </button>
           </div>
 
@@ -171,16 +202,16 @@ export default function PlaylistPage() {
             <div className="card" style={{ padding: 14, marginBottom: 16 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: '0.9rem' }}>
                 <span>
-                  {progress.completed + progress.failed} / {progress.total} videos
+                  {doneCount} / {totalCount} videos
                   {progress.failed > 0 && <span style={{ color: '#ffb4b4' }}> ({progress.failed} failed)</span>}
                 </span>
-                <span>{Math.round(((progress.completed + progress.failed) / Math.max(1, progress.total)) * 100)}%</span>
+                <span>{Math.round((doneCount / Math.max(1, totalCount)) * 100)}%</span>
               </div>
               <div style={{ height: 8, borderRadius: 4, background: 'var(--bg)', overflow: 'hidden' }}>
                 <div
                   style={{
                     height: '100%',
-                    width: `${((progress.completed + progress.failed) / Math.max(1, progress.total)) * 100}%`,
+                    width: `${(doneCount / Math.max(1, totalCount)) * 100}%`,
                     background: progress.finished ? '#4caf50' : 'var(--accent)',
                     transition: 'width 0.3s ease',
                   }}
@@ -193,8 +224,20 @@ export default function PlaylistPage() {
               )}
               {progress.finished && (
                 <p style={{ color: 'var(--muted)', fontSize: '0.8rem', marginTop: 6 }}>
-                  All done — zipping and sending to your browser now…
+                  Done. Each finished video already triggered its own download — check your
+                  Downloads folder. If your browser blocked some as pop-ups, use the links below.
                 </p>
+              )}
+              {progress.ready.length > 0 && jobId && (
+                <ul style={{ marginTop: 10, paddingLeft: 18, fontSize: '0.85rem' }}>
+                  {progress.ready.map((f) => (
+                    <li key={f.videoId}>
+                      <a href={fileUrl(jobId, f.videoId)} download={f.filename} style={{ color: 'inherit' }}>
+                        {f.filename}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
           )}
@@ -212,6 +255,7 @@ export default function PlaylistPage() {
                   type="checkbox"
                   checked={selected.has(video.videoId)}
                   onChange={() => toggle(video.videoId)}
+                  disabled={downloading}
                 />
                 <span style={{ color: 'var(--muted)', width: 28, textAlign: 'right' }}>{i + 1}</span>
                 {video.thumbnail && (
@@ -227,11 +271,11 @@ export default function PlaylistPage() {
       )}
 
       <p className="hint">
-        Each video is downloaded with several parallel connections, and several videos download at
-        once — this is much faster than clicking download on each one, but a large playlist at high
-        quality can still take a while and use real bandwidth. The ZIP starts streaming to your
-        browser as soon as the first videos finish, so the download begins quickly even though the
-        whole thing isn&apos;t done yet.
+        Each video downloads with several parallel connections, and several videos download at
+        once — every finished video becomes its own download immediately, instead of waiting for
+        the whole playlist to bundle into one file. If something interrupts the page partway
+        through (closed tab, lost connection), everything that already finished is already in your
+        Downloads folder; just come back and download the rest separately.
       </p>
     </main>
   );
