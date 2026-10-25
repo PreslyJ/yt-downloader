@@ -20,7 +20,7 @@ interface JobProgress {
   total: number;
   completed: number;
   failed: number;
-  currentTitle: string | null;
+  activeTitles: string[];
   finished: boolean;
 }
 
@@ -88,7 +88,7 @@ export default function PlaylistPage() {
     if (!info || selected.size === 0) return;
     setDownloading(true);
     setDownloadError(null);
-    setProgress({ total: selected.size, completed: 0, failed: 0, currentTitle: null, finished: false });
+    setProgress({ total: selected.size, completed: 0, failed: 0, activeTitles: [], finished: false });
 
     const jobId = crypto.randomUUID();
     const pollInterval = setInterval(() => {
@@ -186,9 +186,9 @@ export default function PlaylistPage() {
                   }}
                 />
               </div>
-              {progress.currentTitle && !progress.finished && (
+              {progress.activeTitles.length > 0 && !progress.finished && (
                 <p style={{ color: 'var(--muted)', fontSize: '0.8rem', marginTop: 6 }}>
-                  Working on: {progress.currentTitle}
+                  Downloading now ({progress.activeTitles.length} at once): {progress.activeTitles.join(' · ')}
                 </p>
               )}
               {progress.finished && (

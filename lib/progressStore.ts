@@ -5,12 +5,21 @@ export interface JobProgress {
   total: number;
   completed: number;
   failed: number;
-  currentTitle: string | null;
+  activeTitles: string[];
   finished: boolean;
   createdAt: number;
 }
 
-const jobs = new Map<string, JobProgress>();
+interface Job {
+  total: number;
+  completed: number;
+  failed: number;
+  active: Map<string, string>; // videoId -> title, for videos currently in flight
+  finished: boolean;
+  createdAt: number;
+}
+
+const jobs = new Map<string, Job>();
 const TTL_MS = 30 * 60 * 1000;
 
 function sweep() {
@@ -22,22 +31,25 @@ function sweep() {
 
 export function createJob(jobId: string, total: number): void {
   sweep();
-  jobs.set(jobId, { total, completed: 0, failed: 0, currentTitle: null, finished: false, createdAt: Date.now() });
+  jobs.set(jobId, { total, completed: 0, failed: 0, active: new Map(), finished: false, createdAt: Date.now() });
 }
 
-export function setCurrentTitle(jobId: string, title: string): void {
-  const job = jobs.get(jobId);
-  if (job) job.currentTitle = title;
+export function markStarted(jobId: string, videoId: string, title: string): void {
+  jobs.get(jobId)?.active.set(videoId, title);
 }
 
-export function markCompleted(jobId: string): void {
+export function markCompleted(jobId: string, videoId: string): void {
   const job = jobs.get(jobId);
-  if (job) job.completed += 1;
+  if (!job) return;
+  job.active.delete(videoId);
+  job.completed += 1;
 }
 
-export function markFailed(jobId: string): void {
+export function markFailed(jobId: string, videoId: string): void {
   const job = jobs.get(jobId);
-  if (job) job.failed += 1;
+  if (!job) return;
+  job.active.delete(videoId);
+  job.failed += 1;
 }
 
 export function markFinished(jobId: string): void {
@@ -46,5 +58,14 @@ export function markFinished(jobId: string): void {
 }
 
 export function getJob(jobId: string): JobProgress | undefined {
-  return jobs.get(jobId);
+  const job = jobs.get(jobId);
+  if (!job) return undefined;
+  return {
+    total: job.total,
+    completed: job.completed,
+    failed: job.failed,
+    activeTitles: [...job.active.values()],
+    finished: job.finished,
+    createdAt: job.createdAt,
+  };
 }

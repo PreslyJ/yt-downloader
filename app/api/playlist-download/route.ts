@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { extractPlaylistId, getPlaylistInfo } from '@/lib/playlist';
-import { createJob, markCompleted, markFailed, markFinished, setCurrentTitle } from '@/lib/progressStore';
+import { createJob, markCompleted, markFailed, markFinished, markStarted } from '@/lib/progressStore';
 import { downloadToFile } from '@/lib/rangedDownload';
 import { USER_AGENT, contentDisposition, getPlayerData, pickAudioFormat, safeFilename } from '@/lib/youtube';
 
@@ -93,13 +93,13 @@ export async function POST(req: NextRequest) {
     try {
       await runPool(selected, VIDEO_CONCURRENCY, async (video, index) => {
         const workDir = join(rootDir, video.videoId);
-        if (jobId) setCurrentTitle(jobId, video.title);
+        if (jobId) markStarted(jobId, video.videoId, video.title);
         try {
           await processVideo({ video, index, quality, workDir, archive, nameFor });
-          if (jobId) markCompleted(jobId);
+          if (jobId) markCompleted(jobId, video.videoId);
         } catch (err) {
           console.error(`playlist item failed (${video.videoId}):`, err);
-          if (jobId) markFailed(jobId);
+          if (jobId) markFailed(jobId, video.videoId);
           archive.append(
             `Failed: ${err instanceof Error ? err.message : 'unknown error'}\n`,
             { name: `${String(index + 1).padStart(3, '0')} - ${safeFilename(video.title)} (FAILED).txt` },
